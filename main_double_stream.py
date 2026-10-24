@@ -7,13 +7,11 @@ import torch.nn as nn
 import numpy as np
 import torch.optim as optim
 from dataset import get_train_val_test_loaders
-from DSHF_oct_conv import model_18, model18_only_freq, model18_only_spa, model_18_wo_cross_encoder, \
-    model_18_wo_cross_layer
-from DSHF_vallina_conv import model_18_vallina, model18_only_spa_vallina, model18_only_freq_vallina
-from models import convnext, cwdr, densenet, efficientnet, mobilvit, resnet, swintransformer, vgg, vit
+
+# from models import convnext, cwdr, densenet, efficientnet, mobilvit, resnet, swintransformer, vgg, vit
 from plotConfusionMatrix import plot_Matrix
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from tsne import test_my_model_with_tsne
+# from tsne import test_my_model_with_tsne
 import time
 from sklearn.metrics import confusion_matrix
 from datetime import datetime
@@ -62,45 +60,62 @@ def test_my_model(model, classes, dataloader_valid):
 def train_model(model, criterion, optimizer, scheduler, start_time, num_epochs):
     best_model_wts = None
     best_acc = 0.0
+
+    # --- 1. 初始化所有指标列表 ---
     train_loss = []
     test_loss = []
+    train_acc = []  # 新增：训练准确率列表
+    test_acc = []  # 新增：测试准确率列表
     train_f1_micro = []
     train_f1_macro = []
+    train_precision_micro = []  # 新增
+    train_precision_macro = []  # 新增
+    train_recall_micro = []  # 新增
+    train_recall_macro = []  # 新增
     test_f1_micro = []
     test_f1_macro = []
+    test_precision_micro = []  # 新增
+    test_precision_macro = []  # 新增
+    test_recall_micro = []  # 新增
+    test_recall_macro = []  # 新增
     lr_list = []
     epoch_list = []
+
     since = time.time()
     save_dir = os.path.join('./result', start_time)
-    os.makedirs(save_dir, exist_ok=True)  # 如果目录已经存在，则不会报错
+    os.makedirs(save_dir, exist_ok=True)
+
     for epoch in range(num_epochs):
-        lr_list.append(scheduler.get_last_lr())
+        current_lr = scheduler.get_last_lr()[0]
+        lr_list.append(current_lr)
         epoch_list.append(epoch)
-        print('Epoch {}/{}, lr {}'.format(epoch + 1, num_epochs, scheduler.get_last_lr()))
-        print('-' * 20)
-        # Each epoch has a training and validation phase
+        print('Epoch {}/{}, lr: {:.8f}'.format(epoch + 1, num_epochs, current_lr))
+        print('-' * 30)
 
         for phase in ['train', 'val']:
             if phase == 'train':
-                print('model is training')
+                print('>>> Training phase')
                 model.train()
             else:
-                print('model is evaling')
+                print('>>> Validation phase')
                 model.eval()
 
-            running_loss, running_corrects, total_samples = 0.0, 0, 0
-            all_preds, all_labels = [], []
+            running_loss = 0.0
+            all_preds = []
+            all_labels = []
 
+            # --- 2. 迭代数据 ---
             for inputs, labels in data_loaders[phase]:
-                # 数据移动到设备上
                 inputs = inputs.to(device)
                 labels = labels.to(device)
-                # print(labels.shape)
-                if labels.dim() == 2:  # 检查是否是 one-hot 编码
+
+                # 处理 one-hot 标签
+                if labels.dim() == 2:
                     labels = torch.argmax(labels, dim=1)
-                # 清零梯度
+
                 optimizer.zero_grad()
 
+                # 前向传播
                 with torch.set_grad_enabled(phase == 'train'):
                     outputs = model(inputs).float()
                     loss = criterion(outputs, labels)
@@ -108,35 +123,57 @@ def train_model(model, criterion, optimizer, scheduler, start_time, num_epochs):
                     if phase == 'train':
                         loss.backward()
                         optimizer.step()
-                # 统计信息
+
+                # 统计
                 running_loss += loss.item() * inputs.size(0)
                 _, preds = torch.max(torch.softmax(outputs, dim=1), 1)
-                corrects = (preds == labels)
-                running_corrects += corrects.sum().item()
-                total_samples += inputs.size(0)
+
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
-                # print(f'dataloder down')
-            # 计算损失、准确率和F1分数
-            epoch_loss = running_loss / total_samples
-            epoch_acc = running_corrects / total_samples
-            all_preds, all_labels = np.array(all_preds), np.array(all_labels)
-            f1_micro = f1_score(all_labels, all_preds, average='micro')
-            f1_macro = f1_score(all_labels, all_preds, average='macro')
 
+            # --- 3. 计算所有指标 ---
+            epoch_loss = running_loss / len(all_labels)
+            all_preds = np.array(all_preds)
+            all_labels = np.array(all_labels)
+
+            # 基础准确率
+            epoch_acc = (all_preds == all_labels).mean()
+
+            # 核心分类指标 (添加 zero_division=0 防止警告)
+            f1_micro = f1_score(all_labels, all_preds, average='micro', zero_division=0)
+            f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+            precision_micro = precision_score(all_labels, all_preds, average='micro', zero_division=0)
+            precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+            recall_micro = recall_score(all_labels, all_preds, average='micro', zero_division=0)
+            recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+
+            # --- 4. 保存指标到列表 ---
             if phase == 'train':
                 train_loss.append(epoch_loss)
-                # 可以选择记录不同的F1分数
+                train_acc.append(epoch_acc)
                 train_f1_micro.append(f1_micro)
                 train_f1_macro.append(f1_macro)
-                scheduler.step()
+                train_precision_micro.append(precision_micro)
+                train_precision_macro.append(precision_macro)
+                train_recall_micro.append(recall_micro)
+                train_recall_macro.append(recall_macro)
+                scheduler.step()  # 仅在训练结束后更新学习率
             else:
                 test_loss.append(epoch_loss)
+                test_acc.append(epoch_acc)
                 test_f1_micro.append(f1_micro)
                 test_f1_macro.append(f1_macro)
+                test_precision_micro.append(precision_micro)
+                test_precision_macro.append(precision_macro)
+                test_recall_micro.append(recall_micro)
+                test_recall_macro.append(recall_macro)
 
-            print('{} Loss: {:.8f} {} Acc: {:.8f} F1 Micro: {:.8f} F1 Macro: {:.8f}'.format(
-                phase, epoch_loss, phase, epoch_acc, f1_micro, f1_macro))
+            # --- 5. 打印完整指标 ---
+            print('{} Loss: {:.4f} | Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+            print('  Micro: P: {:.4f} | R: {:.4f} | F1: {:.4f}'.format(precision_micro, recall_micro, f1_micro))
+            print('  Macro: P: {:.4f} | R: {:.4f} | F1: {:.4f}'.format(precision_macro, recall_macro, f1_macro))
+
+            #
 
             if phase == 'val' and epoch_acc >= best_acc:
                 best_acc = epoch_acc
@@ -250,17 +287,41 @@ if __name__ == '__main__':
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # todo 可选对比模型：convnext,cwdr,densenet,efficientnet,mobilvit,resnet,swintransformer,vgg,vit
-    from wafer_models import cwdr, mernet,msftrans,WMPeleeNet,WSCN
+    from wafer_models import cwdr, mernet,msftrans,WMPeleeNet,WSCN,ACLDN,DPFEENet,FKMA
+    from DSHF_xr_stru import (SFFNet_wo_cross_layer, SFFNet_wo_cross_encoder, SFFNet_conv_spa_oct_freq,
+                              SFFNet_oct_spa_conv_freq,SFFNet_vil_conv,
+                              SFFNet_sffm_add, SFFNet_sffm_mul, SFFNet_sffm_crossatten,
+                              SFFNet_sffmatten_cc, SFFNet_sffmatten_cs, SFFNet_sffmatten_ss,
+                              SFFNet_clfm_mul, SFFNet_clfm_fpnd2u, SFFNet_clfm_fpnu2d, SFFNet_clfm_add
+                              )
+    from models import convnext, densenet, efficientnet, mobilvit, resnet, swintransformer, vgg, vit,peleenet,repvit
+    from wafer_models import cwdr, mernet, msftrans, WMPeleeNet, WSCN,ACLDN,DPFEENet,FKMA
+    from wafer_models import mlr_wm_vit,MRWANet,msmpdcnn
+
     model_factories = [
         # todo 对比实验模型
-        lambda: resnet.ResNet18(1, 38),
-        lambda: densenet.DenseNet121(38, 1),
-        lambda: WSCN.WaferSegClassNet(in_channels=1, num_class=38),
-        lambda: WMPeleeNet.WMPeleeNet(in_ch=1, num_classes=38),
-        lambda: cwdr.CWDR_model(num_of_classes=38),
-        lambda: mernet.MERNet(in_channels=1, num_classes=38),
-        lambda: mobilvit.mobilevit_xxs(38, 1),
-        lambda: msftrans.MSFTransformer(num_classes=38, image_size=64, embed_dim=64, num_heads=8, num_layers=6),
+
+        # lambda: peleenet.PeleeNet(),
+        # lambda: convnext.convnext_small(38, 1),
+        lambda: repvit.repvit_m1_5(num_classes=38, in_channels=1),
+        # lambda: mlr_wm_vit.MLR_WM_ViT(1, 38),
+        lambda: MRWANet.MRWANet(1, 38),
+        # lambda: msmpdcnn.Conv5_MSMP_DCNN(1, 38),
+
+        # lambda: efficientnet.efficientnet_b0(38, 1),
+
+        # lambda: swintransformer.swin_tiny_patch4_window7_224(38, 1),
+        # lambda: vit.vit(image_size=64, patch_size=4, num_classes=38, channels=1),
+        # lambda: resnet.ResNet18(1, 38),
+        # lambda: densenet.DenseNet121(38, 1),
+        # lambda: WSCN.WaferSegClassNet(in_channels=1, num_class=38),
+        # lambda: WMPeleeNet.WMPeleeNet(in_ch=1, num_classes=38),
+        # lambda: cwdr.CWDR_model(num_of_classes=38),
+        # lambda: mernet.MERNet(in_channels=1, num_classes=38),
+        # lambda: mobilvit.mobilevit_xxs(38, 1),
+        # lambda: msftrans.MSFTransformer(num_classes=38, image_size=64, embed_dim=64, num_heads=8, num_layers=6),
+        # lambda: DPFEENet.DPFEE_Net(in_channels=1, num_classes=38),
+        # lambda: FKMA.FMKANet(in_channels=1, num_classes=38, base_channels=64),
         # todo 消融--alpha参数
         # lambda: model_18(num_classes=38, alpha=0.875),
         # lambda: model_18(num_classes=38, alpha=0.75),
@@ -270,23 +331,43 @@ if __name__ == '__main__':
         # lambda: model_18(num_classes=38, alpha=0.25),
         # lambda: model_18(num_classes=38, alpha=0.125),
         # todo 消融--模型结构
-        # lambda: model_18(num_classes=38, alpha=0.5),
-        # lambda: model_18_vallina(num_classes=38),
-        # lambda :model_18_wo_cross_encoder(num_classes=38),
-        lambda: model_18_wo_cross_layer(num_classes=38),
-
-        # todo 消融--双分支结构
-        # lambda: model18_only_spa(num_classes=38),
-        # lambda: model18_only_freq(num_classes=38),
-        # lambda: model18_only_spa_vallina(num_classes=38),
-        # lambda: model18_only_freq_vallina(num_classes=38),
+        # todo 跨编码器融合结构
+        # lambda: SFFNet_sffm_add(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_sffm_mul(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_sffm_crossatten(num_classes=38, alpha=0.5),
+        #
+        # todo SFFM注意力设置
+        # lambda: SFFNet_sffmatten_cs(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_sffmatten_cc(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_sffmatten_ss(num_classes=38, alpha=0.5),
+        #
+        # todo 跨层融合结构
+        # lambda: SFFNet_clfm_add(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_clfm_mul(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_clfm_fpnd2u(num_classes=38, alpha=0.5),
+        # lambda: SFFNet_clfm_fpnu2d(num_classes=38, alpha=0.5),
     ]
     model_names = [
-        # todo 对比实验模型
-        "ResNet18","DenseNet121",
-        "WaferSegClassNet","WMPeleeNet","CWDR_model",
-        "MERNet",
-        "mobilevit_xxs","MSFTransformer",
+        # # todo 对比实验模型
+
+        # 'peleenet',
+        # 'convnext',
+        'repvit',
+        # 'mlr_wm_vit',
+        'MRWANet',
+        # 'Conv5_MSMP_DCNN',
+
+        # "efficientnet",
+
+        # "swintransformer",
+        # "vit",
+        # "ResNet18","DenseNet121",
+        # "WaferSegClassNet","WMPeleeNet","CWDR_model",
+        # "MERNet",
+        # "mobilevit_xxs","MSFTransformer",
+        # "ACLDN",
+        # "DPEENet",
+        # "FMKA",
         # todo 消融--alpha
         # "proposed_alpha_0.875", "proposed_alpha_0.75", "proposed_alpha_0.625",   "proposed_alpha_18_0.5",
         # "proposed_alpha_0.375", "proposed_alpha_0.25",  "proposed_alpha_0.125",
@@ -297,6 +378,22 @@ if __name__ == '__main__':
         # todo 消融-双分支与OCT
         # "proposed_only_spa",
         # "proposed_only_freq", "proposed_only_spa_vallina_conv", "proposed_only_freq_vallina_conv",
+        # todo 普通跨域融合方式的消融
+        # "SFFNet_sffm_add",
+        # "SFFNet_sffm_mul",
+        # "SFFNet_sffm_crossatten",
+
+        # todo sffm注意力设置的消融
+        # "SFFNet_sffmatten_cs",
+        # "SFFNet_sffmatten_cc",
+        # "SFFNet_sffmatten_ss",
+
+        # todo 跨层结构消融
+        # "SFFNet_clfm_add",
+        # "SFFNet_clfm_mul",
+        # "SFFNet_clfm_fpnd2u",
+        # "SFFNet_clfm_fpnu2d",
+
     ]
 
     # results = {}
@@ -308,37 +405,47 @@ if __name__ == '__main__':
     #         "input_shape": input_shape,
     #     }
 
-
-    print(f'numbers of model_names: {len(model_names)},model_factories: {len(model_factories)}')
+    print(f'numbers of model_names: {len(model_names)}, model_factories: {len(model_factories)}')
     for i, (model_factory, model_name) in enumerate(zip(model_factories, model_names)):
-        print(f"\n===== 开始训练 {model_name}=====")
-        # 初始化模型
-        model = model_factory()
-        weight_init(model)
-        model = model.to(device)
+        # 每个模型运行3次
+        for run_id in range(1, 4):
+            print(f"\n===== 开始训练 {model_name} (第{run_id}/3次) =====")
 
-        # 定义优化器和损失函数（可根据模型调整参数）
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=1e-3)
-        lr_schedule = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)  # or CosineAnnealingLR
+            # 初始化模型（每次重新初始化，确保独立性）
+            model = model_factory()
+            weight_init(model)
+            model = model.to(device)
 
-        start_time = datetime.now().strftime(f"{model_name}_mc_%Y%m%d_%H%M%S")
+            # 定义优化器和损失函数
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=1e-3)
+            lr_schedule = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
-        # 训练模型
-        print(f'Start training at {start_time}')
-        trained_model = train_model(
-            model, criterion, optimizer, lr_schedule,
-            start_time, num_epochs=num_epochs
-        )
-        print(f'Finished training {model_name} at {datetime.now().strftime("%Y%m%d_%H%M%S")}')
-        test_my_model(trained_model, classes, test_DataLoader)
-        #test_my_model_with_tsne(trained_model, classes, test_DataLoader, model_name)
+            # 生成带运行序号的时间戳，便于区分保存的模型文件
+            start_time = datetime.now().strftime(f"{model_name}_run{run_id}_mc_%Y%m%d_%H%M%S")
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # 训练模型
+            print(f'Start training at {start_time}')
+            trained_model = train_model(
+                model, criterion, optimizer, lr_schedule,
+                start_time, num_epochs=num_epochs
+            )
+            print(f'Finished training {model_name} (第{run_id}/3次) at {datetime.now().strftime("%Y%m%d_%H%M%S")}')
 
+            # 测试模型
+            test_my_model(trained_model, classes, test_DataLoader)
+            # test_my_model_with_tsne(trained_model, classes, test_DataLoader, model_name)
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # 每次运行后短暂休息（可选，避免资源冲突）
+            time.sleep(10)
+
+        # 每个模型的所有3次运行结束后，按照原逻辑处理延迟
         if i < 5:
             time.sleep(30)
 
+    # 所有模型训练完成后，关机
     time.sleep(600)
     os.system("/usr/bin/shutdown")

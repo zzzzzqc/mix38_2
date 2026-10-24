@@ -250,6 +250,7 @@ class MixFFN_skip(nn.Module):
 class Cross_Layer_Fusion(nn.Module):
     def __init__(self, dims, size):
         super().__init__()
+        #     dim, size = [128, 256, 512], 196
         self.dims = dims
         self.size = size
 
@@ -283,13 +284,19 @@ class Cross_Layer_Fusion(nn.Module):
         self.mlp = MixFFN_skip(dims[1], dims[1] * 4)
 
     def forward(self, x_s, x_m, x_d):
+        # print(x_s.shape)
+        # print(x_m.shape)
+        # print(x_d.shape)
         B_s, C_s, H_s, W_s = x_s.shape
         B_m, C_m, H_m, W_m = x_m.shape
         B_d, C_d, H_d, W_d = x_d.shape
         x_s = x_s.reshape(B_s, C_s, -1).permute(0, 2, 1)
+
         x_m = x_m.reshape(B_m, C_m, -1).permute(0, 2, 1)
         x_d = x_d.reshape(B_d, C_d, -1).permute(0, 2, 1)
-
+        # print(x_s.shape)
+        # print(x_m.shape)
+        # print(x_d.shape)
         x_s2m = self.linear_s2m(x_s)
         x_m2s = self.linear_m2s(x_m)
         x_d2m = self.linear_d2m(x_d)
@@ -310,7 +317,7 @@ class Cross_Layer_Fusion(nn.Module):
         atten = x_m + atten_final
         atten = Rearrange('b (h w) c -> b c h w', h=H_m, w=W_m)(atten)
         # atten_norm = self.norm(atten)
-        # print(atten.shape, atten_norm.shape)
+        print(atten.shape)
         # atten = atten + self.mlp(atten_norm, *self.size)
         return atten
 
@@ -334,6 +341,60 @@ class Cross_Encoder_Fusion(nn.Module):
 
         out = x_spa_2 + x_freq_2
 
+        return out
+
+
+class Cross_Encoder_Fusion_abla(nn.Module):
+    def __init__(self, in_channels, attenmode='base',addmode = 'mixed_add'):
+        super().__init__()
+        self.attenmode = attenmode
+        self.addmode = addmode
+        if self.attenmode == 'base':
+            self.spa_atten = SpatialAttention(in_channels)
+            self.cha_atten = ChannelAttention(in_channels)
+        elif self.attenmode == 'mixed_casa':
+            self.spa_atten = ChannelAttention(in_channels)
+            self.cha_atten = SpatialAttention(in_channels)
+        elif self.attenmode == 'mixed_caca':
+            self.spa_atten = ChannelAttention(in_channels)
+            self.cha_atten = ChannelAttention(in_channels)
+        elif self.attenmode == 'mixed_sasa':
+            self.spa_atten = SpatialAttention(in_channels)
+            self.cha_atten = SpatialAttention(in_channels)
+        elif self.attenmode == 'mixed_eatten':
+
+            self.attention = Cross_Atten_Encoder_Fusion(in_channels)
+        elif self.addmode == 'mixed_eatten':
+
+            self.attention = Cross_Atten_Encoder_Fusion(in_channels)
+
+        self.conv = nn.Conv2d(in_channels, in_channels, (1, 1), 1)
+
+    def forward(self, x_spa, x_freq):
+        if self.addmode == 'mixed_eadd':
+            out = x_spa + x_freq
+        elif self.addmode == 'mixed_emul':
+            out = x_spa * x_freq
+        elif self.addmode == 'mixed_eatten':
+            out = self.attention(x_spa, x_freq)
+        elif self.addmode == 'mixed_add':
+            x_spa_1 = self.conv(x_spa)
+            x_freq_1 = self.conv(x_freq)
+            x_spa_1_sa = x_spa_1 + x_freq_1
+            x_freq_1_ca = x_spa_1 + x_freq_1
+            x_spa_2 = x_spa_1 + x_spa_1 * x_freq_1_ca
+            x_freq_2 = x_freq_1 + x_freq_1 * x_spa_1_sa
+
+            out = x_spa_2 + x_freq_2
+        else:
+            x_spa_1 = self.conv(x_spa)
+            x_freq_1 = self.conv(x_freq)
+            x_spa_1_sa = self.spa_atten(x_spa_1)
+            x_freq_1_ca = self.cha_atten(x_freq_1)
+            x_spa_2 = x_spa_1 + x_spa_1 * x_freq_1_ca
+            x_freq_2 = x_freq_1 + x_freq_1 * x_spa_1_sa
+
+            out = x_spa_2 + x_freq_2
         return out
 
 
@@ -453,31 +514,186 @@ class Cross_Atten_Encoder_Fusion(nn.Module):
         return self.fusion(fused)
 
 
+
+class MultiScaleFPNd2u(nn.Module):
+
+    def __init__(self, in_channels=None, norm_layer=nn.BatchNorm2d, act_layer=nn.SiLU):
+
+        super().__init__()
+        if in_channels is None:
+            in_channels = [128, 256, 512]
+        self.in_channels = in_channels
+        self.num_levels = len(in_channels)
+
+        # 横向卷积：统一通道数到 in_channels[0]
+        self.topdown_laterals = nn.ModuleList([
+            self._make_conv_block(ch, in_channels[0], norm_layer, act_layer)
+            for ch in in_channels
+        ])
+        # 平滑卷积（用于融合后的特征细化）
+        self.topdown_smooths = nn.ModuleList([
+            self._make_conv_block(in_channels[0], in_channels[0], norm_layer, act_layer, kernel_size=3)
+            for _ in range(self.num_levels - 1)
+        ])
+
+    def _make_conv_block(self, in_channels, out_channels, norm_layer, act_layer,
+                         kernel_size=1, stride=1, padding=0):
+        """构建 Conv-BN-Act 模块"""
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
+            norm_layer(out_channels),
+            act_layer()
+        )
+
+    def forward(self, *features):
+
+        assert len(features) == self.num_levels, "输入特征图数量与 in_channels 长度不匹配"
+
+        # 1. 横向卷积统一通道
+        topdown_lats = [lat(feat) for lat, feat in zip(self.topdown_laterals, features)]
+
+        # 2. 从最低分辨率开始上采样融合
+        fused = topdown_lats[-1]
+        for i in range(self.num_levels - 2, -1, -1):
+            # 上采样到当前层分辨率
+            fused = F.interpolate(fused, size=topdown_lats[i].shape[2:],
+                                  mode='bilinear', align_corners=False)
+            # 逐元素融合 + 平滑
+            fused = fused + topdown_lats[i]
+            if i > 0:
+                fused = self.topdown_smooths[i - 1](fused)
+        high_res_out = self.topdown_smooths[0](fused) if self.num_levels > 1 else fused
+
+        return high_res_out
+
+
+class MultiScaleFPNu2d(nn.Module):
+    def __init__(self, norm_layer=nn.BatchNorm2d, act_layer=nn.SiLU, in_channels=None, ):
+        super().__init__()
+        if in_channels is None:
+            in_channels = [128, 256, 512]
+        self.in_channels = in_channels
+        self.num_levels = len(in_channels)
+
+        self.bottomup_laterals = nn.ModuleList([
+            self._make_conv_block(ch, in_channels[-1], norm_layer, act_layer)
+            for ch in in_channels
+        ])
+
+        # ====================== 修复：正确下采样（尺寸严格减半）======================
+        self.bottomup_downsamples = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_channels[-1], in_channels[-1], kernel_size=3, stride=2, padding=1, bias=False),
+                norm_layer(in_channels[-1]),
+                act_layer()
+            )
+            for _ in range(self.num_levels - 1)
+        ])
+
+        self.bottomup_smooths = nn.ModuleList([
+            self._make_conv_block(in_channels[-1], in_channels[-1], norm_layer, act_layer, kernel_size=3, padding=1)
+            for _ in range(self.num_levels - 1)
+        ])
+
+    def _make_conv_block(self, in_channels, out_channels, norm_layer, act_layer,
+                         kernel_size=1, stride=1, padding=0):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
+            norm_layer(out_channels),
+            act_layer()
+        )
+
+    def forward(self, *features):
+        assert len(features) == self.num_levels, "输入特征图数量与 in_channels 长度不匹配"
+        bottomup_lats = [lat(feat) for lat, feat in zip(self.bottomup_laterals, features)]
+
+        fused = bottomup_lats[0]
+        # print(fused.shape)
+        for i in range(1, self.num_levels):
+            fused = self.bottomup_downsamples[i - 1](fused)
+            fused = fused + bottomup_lats[i]
+            fused = self.bottomup_smooths[i - 1](fused)
+
+        return fused
+
+
+class madd(nn.Module):
+    def __init__(self, conv1, conv2, conv3):
+        super(madd, self).__init__()
+
+        self.conv1 = conv1
+        self.conv2 = conv2
+        self.conv3 = conv3
+        self.pool = nn.AdaptiveAvgPool2d(4)
+
+    def forward(self, x1, x2, x3):
+        return self.conv1(self.pool(x1)) + self.conv2(self.pool(x2)) + self.conv3(self.pool(x3))
+
+
+class multi(nn.Module):
+    """
+    多尺度输出FPN模块
+    输入：三个特征图 (B,64,32,32)、(B,128,16,16)、(B,256,8,8)
+    输出1：上采样融合后的高分辨率特征图 (B,64,32,32)
+    输出2：融合后的低分辨率特征图 (B,256,8,8)
+    """
+
+    def __init__(self, conv1, conv2, conv3):
+        super(multi, self).__init__()
+
+        self.conv1 = conv1
+        self.conv2 = conv2
+        self.conv3 = conv3
+        self.pool = nn.AdaptiveAvgPool2d(4)
+
+    def forward(self, x1, x2, x3):
+        return self.conv1(self.pool(x1)) * self.conv2(self.pool(x2)) * self.conv3(self.pool(x3))
+
+
+
 if __name__ == '__main__':
-    print('##############')
-    x1 = torch.randn(1, 128, 128, 128)
-    x2 = torch.randn(1, 256, 64, 64)
-    x3 = torch.randn(1, 512, 32, 32)
-    dims = [128, 256, 512]
-    size = 196
-    model = Cross_Layer_Fusion(dims, size)
-    out = model(x1, x2, x3)
-    print('Cross_Layer_Fusion: ', out.shape)
+    # print('##############')
+    # x1 = torch.randn(1, 128, 128, 128)
+    # x2 = torch.randn(1, 256, 64, 64)
+    # x3 = torch.randn(1, 512, 32, 32)
+    # dims = [128, 256, 512]
+    # size = 196
+    # model = Cross_Layer_Fusion(dims, size)
+    # out = model(x1, x2, x3)
+    # print('Cross_Layer_Fusion: ', out.shape)
+    #
+    # x4 = torch.randn(1, 64, 4, 4)
+    # x5 = torch.randn(1, 64, 4, 4)
+    # model_cef = Cross_Encoder_Fusion(64)
+    # out = model_cef(x4, x5)
+    # print('Cross_Encoder_Fusion', out.shape)
+    #
+    # x1 = torch.randn(2, 256, 32, 32)
+    # x2 = torch.randn(2, 256, 32, 32)
+    #
+    # # 初始化融合模块
+    # fusion = Cross_Atten_Encoder_Fusion(channels=256)
+    #
+    # # 前向传播
+    # output = fusion(x1, x2)
+    #
+    # print(f"输入形状: {x1.shape}, {x2.shape}")
+    # print(f"输出形状: {output.shape}")  # 应该保持 (2, 256, 32, 32)
 
-    x4 = torch.randn(1, 64, 4, 4)
-    x5 = torch.randn(1, 64, 4, 4)
-    model_cef = Cross_Encoder_Fusion(64)
-    out = model_cef(x4, x5)
-    print('Cross_Encoder_Fusion', out.shape)
+    in_channels = 256
+    batch_size = 1
+    height = 32
+    width = 32
 
-    x1 = torch.randn(2, 256, 32, 32)
-    x2 = torch.randn(2, 256, 32, 32)
+    # 生成随机输入
+    x_spa = torch.randn(batch_size, in_channels, height, width)
+    x_freq = torch.randn(batch_size, in_channels, height, width)
 
-    # 初始化融合模块
-    fusion = Cross_Atten_Encoder_Fusion(channels=256)
-
-    # 前向传播
-    output = fusion(x1, x2)
-
-    print(f"输入形状: {x1.shape}, {x2.shape}")
-    print(f"输出形状: {output.shape}")  # 应该保持 (2, 256, 32, 32)
+    # 测试所有模式
+    modes = ['mixed_eadd', 'base', 'mixed_casa', 'mixed_caca', 'mixed_sasa', 'mixed_emul','mixed_eatten','mixed_add']
+    for mode in modes:
+        print(f"Testing mode: {mode}")
+        model = Cross_Encoder_Fusion_abla(in_channels, mode)
+        output = model(x_spa, x_freq)
+        print(f"Input shape: {x_spa.shape}, Output shape: {output.shape}")
+        print("-" * 50)

@@ -29,40 +29,178 @@ class DoubleConv(nn.Module):
         return self.relu(out)
 
 
+# class FrequencyFilter(nn.Module):
+#     def __init__(self, in_channels, out_channels, first=False):
+#         super().__init__()
+#         self.first = first
+#
+#         if self.first:
+#             self.first_conv = nn.Conv2d(1, 8, kernel_size=(1, 1),  stride=1, padding=0)
+#
+#         self.amp_mask = nn.Sequential(
+#             nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1),
+#             nn.LeakyReLU(0.1, inplace=True),
+#             nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+#         )
+#         self.pha_mask = nn.Sequential(
+#             nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1),
+#             nn.LeakyReLU(0.1, inplace=True),
+#             nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+#         )
+#
+#         self.channel_adjust = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+#
+#     def forward(self, x):
+#
+#         if self.first: x = self.first_conv(x)
+#
+#         b, c, h, w = x.shape
+#
+#         msF = fft.rfft2(x + 1e-8, norm='backward')
+#
+#         msF_amp = torch.abs(msF)
+#         msF_pha = torch.angle(msF)
+#
+#         amp_fuse = self.amp_mask(msF_amp) + msF_amp
+#         pha_fuse = self.pha_mask(msF_pha) + msF_pha
+#
+#         real = amp_fuse * torch.cos(pha_fuse) + 1e-8
+#         imag = amp_fuse * torch.sin(pha_fuse) + 1e-8
+#
+#         out = torch.complex(real, imag) + 1e-8
+#         out = torch.abs(torch.fft.irfft2(out, s=(h, w), norm='backward'))
+#         out = out + x
+#         out = self.channel_adjust(out)
+#         out = torch.nan_to_num(out, nan=1e-5, posinf=1e-5, neginf=1e-5)
+#
+#         return out
+
+
 class FrequencyFilter(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    """
+    频域滤波模块，支持五种模式：
+    - 'original'      : 直接处理相位角（原始方式）
+    - 'sincos'        : 在正弦-余弦空间处理相位（连续、稳定）
+    - 'magnitude_only': 仅利用幅度谱，相位置零
+    - 'phase_only'    : 仅利用相位谱，幅度归一化为1（正弦-余弦空间）
+    - 'angle_only'    : 仅利用相位谱，直接处理原始角度（幅度固定为1）
+    """
+
+    def __init__(self, in_channels, out_channels, first=False, mode='sincos'):
         super().__init__()
+        self.first = first
+        self.mode = mode
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
-        self.amp_mask = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
-        )
-        self.pha_mask = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
-        )
+        if self.first:
+            self.first_conv = nn.Conv2d(1, in_channels, kernel_size=1)
 
+        # 创建幅值掩码（除 phase_only 和 angle_only 外均使用）
+        if mode != 'phase_only' and mode != 'angle_only':
+            self.amp_mask = nn.Sequential(
+                nn.Conv2d(in_channels, in_channels, 3, padding=1),
+                nn.LeakyReLU(0.1, inplace=True),
+                nn.Conv2d(in_channels, in_channels, 3, padding=1)
+            )
+
+        # 创建相位掩码（根据模式选择通道数）
+        if mode == 'original':
+            self.pha_mask = nn.Sequential(
+                nn.Conv2d(in_channels, in_channels, 3, padding=1),
+                nn.LeakyReLU(0.1, inplace=True),
+                nn.Conv2d(in_channels, in_channels, 3, padding=1)
+            )
+        elif mode in ['sincos', 'phase_only']:
+            self.pha_mask = nn.Sequential(
+                nn.Conv2d(2 * in_channels, 2 * in_channels, 3, padding=1),
+                nn.LeakyReLU(0.1, inplace=True),
+                nn.Conv2d(2 * in_channels, 2 * in_channels, 3, padding=1)
+            )
+        elif mode == 'angle_only':   # 新增
+            self.pha_mask = nn.Sequential(
+                nn.Conv2d(in_channels, in_channels, 3, padding=1),
+                nn.LeakyReLU(0.1, inplace=True),
+                nn.Conv2d(in_channels, in_channels, 3, padding=1)
+            )
+        # magnitude_only 模式无需相位掩码
+
+        # 通道调整层
         self.channel_adjust = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
-    def forward(self, x):
-        b, c, h, w = x.shape
-        msF = fft.rfft2(x + 1e-8, norm='backward')
+        # 短路连接
+        if in_channels != out_channels:
+            self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        else:
+            self.shortcut = nn.Identity()
 
+    def forward(self, x):
+        if self.first:
+            x = self.first_conv(x)
+
+        identity = self.shortcut(x)
+        b, c, h, w = x.shape
+
+        # 频域变换
+        msF = fft.rfft2(x + 1e-8, norm='backward')
         msF_amp = torch.abs(msF)
         msF_pha = torch.angle(msF)
 
-        amp_fuse = self.amp_mask(msF_amp) + msF_amp
-        pha_fuse = self.pha_mask(msF_pha) + msF_pha
+        # ---------- 根据模式处理 ----------
+        if self.mode == 'original':
+            # 原始相位角模式
+            amp_fuse = self.amp_mask(msF_amp) + msF_amp
+            pha_fuse = self.pha_mask(msF_pha) + msF_pha
+            real = amp_fuse * torch.cos(pha_fuse)
+            imag = amp_fuse * torch.sin(pha_fuse)
 
-        real = amp_fuse * torch.cos(pha_fuse) + 1e-8
-        imag = amp_fuse * torch.sin(pha_fuse) + 1e-8
+        elif self.mode == 'sincos':
+            # 正弦-余弦空间模式（同时学习幅值和相位）
+            cos_pha, sin_pha = torch.cos(msF_pha), torch.sin(msF_pha)
+            pha_feat = torch.cat([cos_pha, sin_pha], dim=1)
+            pha_residual = self.pha_mask(pha_feat)
+            delta_cos = pha_residual[:, :c, :, :]
+            delta_sin = pha_residual[:, c:, :, :]
+            cos_fuse = cos_pha + delta_cos
+            sin_fuse = sin_pha + delta_sin
+            norm = torch.sqrt(cos_fuse ** 2 + sin_fuse ** 2 + 1e-8)
+            cos_fuse = cos_fuse / norm
+            sin_fuse = sin_fuse / norm
+            amp_fuse = self.amp_mask(msF_amp) + msF_amp
+            real = amp_fuse * cos_fuse
+            imag = amp_fuse * sin_fuse
 
-        out = torch.complex(real, imag) + 1e-8
-        out = torch.abs(torch.fft.irfft2(out, s=(h, w), norm='backward'))
-        out = out + x
-        out = self.channel_adjust(out)
+        elif self.mode == 'magnitude_only':
+            # 仅幅度谱模式
+            amp_fuse = self.amp_mask(msF_amp) + msF_amp
+            real, imag = amp_fuse, torch.zeros_like(amp_fuse)
+
+        elif self.mode == 'phase_only':
+            # 仅相位谱模式（正弦-余弦空间，幅度固定为1）
+            cos_pha, sin_pha = torch.cos(msF_pha), torch.sin(msF_pha)
+            pha_feat = torch.cat([cos_pha, sin_pha], dim=1)
+            pha_residual = self.pha_mask(pha_feat)
+            delta_cos = pha_residual[:, :c, :, :]
+            delta_sin = pha_residual[:, c:, :, :]
+            cos_fuse = cos_pha + delta_cos
+            sin_fuse = sin_pha + delta_sin
+            norm = torch.sqrt(cos_fuse ** 2 + sin_fuse ** 2 + 1e-8)
+            cos_fuse = cos_fuse / norm
+            sin_fuse = sin_fuse / norm
+            real = cos_fuse
+            imag = sin_fuse
+
+        elif self.mode == 'angle_only':   # 新增
+            # 仅相位角度模式：直接处理原始角度，幅度固定为1
+            pha_fuse = self.pha_mask(msF_pha) + msF_pha
+            real = torch.cos(pha_fuse)
+            imag = torch.sin(pha_fuse)
+
+        # 逆变换
+        out = fft.irfft2(torch.complex(real, imag), s=(h, w), norm='backward')
+
+        # 残差 + 通道调整
+        out = self.channel_adjust(out) + identity
         out = torch.nan_to_num(out, nan=1e-5, posinf=1e-5, neginf=1e-5)
 
         return out
@@ -98,13 +236,13 @@ class SpatialEnc(nn.Module):
 
 
 class FrequencyEnc(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, mode='original'):  # original,sincos,magnitude_only,phase_only
         super(FrequencyEnc, self).__init__()
         self.dounsample = nn.MaxPool2d(2)
-        self.enc_blk1 = FrequencyFilter(in_channels, out_channels=64)
-        self.enc_blk2 = FrequencyFilter(in_channels=64, out_channels=128)
-        self.enc_blk3 = FrequencyFilter(in_channels=128, out_channels=256)
-        self.enc_blk4 = FrequencyFilter(in_channels=256, out_channels=512)
+        self.enc_blk1 = FrequencyFilter(in_channels * 8, out_channels=64, mode=mode, first=True)
+        self.enc_blk2 = FrequencyFilter(in_channels=64, out_channels=128, mode=mode)
+        self.enc_blk3 = FrequencyFilter(in_channels=128, out_channels=256, mode=mode)
+        self.enc_blk4 = FrequencyFilter(in_channels=256, out_channels=512, mode=mode)
 
     def forward(self, x):
         x0 = self.enc_blk1(x)  # [64, H, W]
@@ -127,7 +265,8 @@ class FrequencyEnc(nn.Module):
 
 
 class DSHF_Integrated(nn.Module):
-    def __init__(self, in_channels, dim, size, num_classes=38, mode='mixed', norm_layer=None):
+    def __init__(self, in_channels, dim, size, num_classes=38, mode='mixed', freq_mode='original', norm_layer=None):
+        # # original,sincos,magnitude_only
         """
         - mode='mixed' : 同时使用空间和频率编码 (默认)
         - mode='spa'   : 仅使用空间编码
@@ -139,8 +278,8 @@ class DSHF_Integrated(nn.Module):
 
         if self.mode in ['mixed', 'spa']:
             self.spatial_enc = SpatialEnc(in_channels)
-        if self.mode in ['mixed', 'freq']:
-            self.frequency_enc = FrequencyEnc(in_channels)
+        if self.mode in ['mixed', 'freq']:  # original,sincos,magnitude_only,phase_only
+            self.frequency_enc = FrequencyEnc(in_channels, mode=freq_mode)
 
         self.cross_layer_fusion = Cross_Layer_Fusion(dim, size)
 
@@ -154,7 +293,7 @@ class DSHF_Integrated(nn.Module):
 
     def forward(self, x):
         spa_features, freq_features = [], []
-        final_out =None
+        final_out = None
         if self.mode in ['mixed', 'spa']:
             *spa_features, = self.spatial_enc(x)  # 解包所有空间特征
         if self.mode in ['mixed', 'freq']:
@@ -176,13 +315,14 @@ class DSHF_Integrated(nn.Module):
         return self.fc(final_out.view(final_out.size(0), -1))
 
 
-def build_integrated_model(mode='mixed', **kwargs):
+def build_integrated_model(mode='mixed', freq_mode='original', **kwargs):
     dim, size = [128, 256, 512], 196
     return DSHF_Integrated(
         in_channels=1,
         dim=dim,
         size=size,
         mode=mode,
+        freq_mode=freq_mode,
         **kwargs
     )
 
@@ -197,11 +337,34 @@ def model18_only_spa_vallina(**kwargs):
     return spa_model
 
 
-def model18_only_freq_vallina(pretrained=False, **kwargs):
-    freq_model = build_integrated_model(mode='freq', **kwargs)
-    return freq_model
+# original,sincos,magnitude_only,phase_only
+def model18_only_freq_vallina_ori(pretrained=False, **kwargs):
+    freq_model_or = build_integrated_model(mode='freq', freq_mode='original', **kwargs)
+    return freq_model_or
+
+
+def model18_only_freq_vallina_sincos(pretrained=False, **kwargs):
+    freq_model_sc = build_integrated_model(mode='freq', freq_mode='sincos', **kwargs)
+    return freq_model_sc
+
+
+def model18_only_freq_vallina_amp(pretrained=False, **kwargs):
+    freq_model_amp = build_integrated_model(mode='freq', freq_mode='magnitude_only', **kwargs)
+    return freq_model_amp
+
+
+def model18_only_freq_vallina_pha(pretrained=False, **kwargs):
+    freq_model_pha = build_integrated_model(mode='freq', freq_mode='phase_only', **kwargs)
+    return freq_model_pha
+
+def model18_only_freq_vallina_ang(pretrained=False, **kwargs):
+    freq_model_pha = build_integrated_model(mode='freq', freq_mode='angle_only', **kwargs)
+    return freq_model_pha
+
 from thop import profile
 from thop import clever_format
+
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -214,22 +377,23 @@ def count_flops(model, input):
 
 if __name__ == '__main__':
     # 创建不同模式模型
-    mixed_model = model_18_vallina(num_classes=9)
+    # mixed_model = model_18_vallina(num_classes=9)
     spa_model = model18_only_spa_vallina(num_classes=10)
-    freq_model = model18_only_freq_vallina(num_classes=11)
+    freq_model1 = model18_only_freq_vallina_ori(num_classes=11)
+    freq_model2 = model18_only_freq_vallina_amp(num_classes=11)
+    freq_model3 = model18_only_freq_vallina_pha(num_classes=11)
+    freq_model4 = model18_only_freq_vallina_sincos(num_classes=11)
+    mixed_model = freq_model4
 
     x = torch.randn(1, 1, 64, 64)
     print("Mixed模型输出尺寸:", mixed_model(x).shape)
     print("模型输出尺寸:", mixed_model(x).shape)
     total = count_parameters(mixed_model)
     flops = count_flops(mixed_model, x)
-    print("Number of parameter: %.2fM" % (total/1e6))
+    print("Number of parameter: %.2fM" % (total / 1e6))
     print(flops)
-    print("Spa模型输出尺寸:", spa_model(x).shape)
-    print("Freq模型输出尺寸:", freq_model(x).shape)
 
     # # 参数统计
     # from torchinfo import summary
     #
     # summary(mixed_model, input_size=(1, 1, 64, 64))
-

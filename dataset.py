@@ -75,6 +75,30 @@ class WaferDefectDataset(Dataset):
         return new_label
 
 
+def get_train_test_loaders(datapath,
+                               batch_size=128,
+                               test_size=0.2,
+                               random_state=42):
+    data = np.load(datapath)
+    # 获取数据和标签
+    images = data['arr_0']
+    labels = data['arr_1']
+
+
+    train_images, test_images, train_labels, test_labels = train_test_split(
+        images, labels, test_size=test_size, random_state=42, stratify=labels)
+
+
+    train_dataset = WaferDefectDataset(train_images, train_labels, mode='train')
+
+    test_dataset = WaferDefectDataset(test_images, test_labels, mode='test')
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    return train_dataloader, test_dataloader
+
 def get_train_val_test_loaders(datapath,
                                batch_size=128,
                                test_size=0.2,

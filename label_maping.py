@@ -43,7 +43,7 @@ label_mapping = {
 #            'C+ER' 'C+L' 'C+S' 'D+EL' 'D+ER' 'D+L' 'D+S' 'EL+L' 'EL+S' 'ER+L' 'ER+S' 'L+S'
 #            'C+EL+L' 'C+EL+S' 'C+ER+L' 'C+ER+S' 'C+L+S' 'D+EL+L' 'D+EL+S' 'D+ER+L' 'D+ER+S'
 #            'D+L+S' 'EL+L+S' 'ER+L+S' 'C+L+EL+S' 'C+L+ER+S' 'D+L+EL+S' 'D+L+ER+S')
-# import numpy as np
+
 # def convert_labels(labels label_mapping):
 #     """
 #     将多标签向量转换为对应的类别索引
